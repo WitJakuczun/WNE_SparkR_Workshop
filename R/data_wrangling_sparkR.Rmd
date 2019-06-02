@@ -1,0 +1,431 @@
+---
+title: "Przetwarzanie danych w SparkR"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Initialize environment
+
+## Initialize R Suite project
+
+```{r, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Podłączenie się do Spark
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+library(magrittr)
+library(SparkR)
+
+SparkR::sparkR.session(master = "spark://spark-master:7077")
+```
+
+# Tworzenie ramek danych
+
+Spark operuje na ramkach danych (*SparkDataFrame*). Ramki danych w Spark są bardzo podobne do `data.frame` z R. 
+
+Ramki danych można generalnie utworzyć na dwa sposoby:
+
+* z ramek lokalnych, które są w R
+* wczytując dane ze źródeł zewnętrznych: pliki lub tabele Hive
+
+## Wczytywanie ramek z poziomu R
+
+Na początku utwórzmy ramkę danych w R
+
+```{r, r_data.frame_create}
+df <- faithful
+
+head(df)
+```
+
+Mając ramkę `df` możemy utworzyć jest kopię w pamięci Spark
+
+```{r, r_data.frame_to_spark}
+spark_df <- as.DataFrame(data = df)
+
+head(spark_df)
+```
+
+### Określanie liczby partycji lub sampling
+
+Wczytując ramkę z R do Spark można określić następujące parametry:
+
+* `numPartitions` - na ile partycji podzielić ramkę
+* `samplingRatio` - jaki procent ramki wczytać (**nie używane**)
+* `schema` - jakie są typy kolumn
+
+Przykład poniżej pokazuje użycie wszystkich parametrów
+
+```{r, r_data.frame_to_spark_full}
+spark_df_2 <- as.DataFrame(data = df,
+                           numPartitions = 4,
+                           schema = structType(structField("eruptions", "double"),
+                                               structField("waiting", "double")))
+head(spark_df_2)
+nrow(spark_df_2)
+
+schema(spark_df_2)
+getNumPartitions(spark_df_2)
+```
+
+## Wczytywanie danych z plików
+
+### Wczytywanie z plików CSV
+
+Wczytajmy dane z pliku `/data/wowah_data.csv`
+
+```{r, r_read_csv}
+wowah_csv <- SparkR::loadDF(path = file.path("/data/wowah_data.csv"),
+                            source = "csv",
+                            header = "true",
+                            inferSchema = "true",
+                            na.strings = "NA") %>%
+  cache()
+```
+
+#### Podanie schematu danych
+
+Parametry użyte w funkcji `loadDF`:
+
+* `source`: nazwa źrodła danych. W naszym przypadku jest to `csv`
+* `header`: czy jest nagłówek?
+* `inferSchema`: próba ustalenia automatycznego jakie są typy kolumn
+
+Jak wiemy jakie są typy kolumn, lub automat nie umiał ich ustalić to możemy podać je wprost
+
+```{r, r_read_csv_schema}
+wowah_csv <- SparkR::loadDF(path = file.path("/data/wowah_data.csv"),
+                            source = "csv",
+                            header = "true",
+                            na.strings = "NA",
+                            schema = structType(
+                              structField("char", "string"),
+                              structField("level", "integer"),
+                              structField("race", "string"),
+                              structField("charclass", "string"),
+                              structField("zone", "string"),
+                              structField("guild", "integer"),
+                              structField("timestamp", "string")
+                            )) %>%
+  cache()
+
+head(wowah_csv)
+print(schema(wowah_csv))
+```
+
+# Przekształcanie ramek danych
+
+Przekształcanie ramek danych w Spark opiera się o następujące instrukcje:
+
+* `select` - wybór kolumn
+* `filter` - wybór wierszy spełniających warunek
+* `groupBy`/`group_by` - grupowanie wierszy
+* `summarize` - podsumowanie (agregaty) dla tabeli
+
+Dodatkowo można przekształcać kolumny podobnie jak w `data.frame`.
+
+## Wybór kolumn
+
+```{r, df_select}
+wowah_char_level <- wowah_csv %>%
+  SparkR::select("char", "level")
+
+head(wowah_char_level)
+```
+
+## Wybór wierszy
+
+```{r, df_filter}
+wowah_level_ge_10 <- wowah_csv %>%
+  SparkR::filter(wowah_csv$level > 10)
+
+head(wowah_level_ge_10)
+```
+## Grupowanie i agregacja danych
+
+Użycie funkcji `groupBy`/`group_by` tworzy ramkę *pogrupowaną*.
+```{r, df_groupBy}
+wowah_grp_race_charclass <- wowah_csv %>%
+  SparkR::group_by("race", "charclass")
+
+str(wowah_grp_race_charclass)
+```
+
+Na takiej ramce można wywoływać różne operacje
+
+```{r, df_summarise}
+wowah_grp_race_charclass_ave_level <- wowah_grp_race_charclass %>%
+  SparkR::summarize(mean_lvl = avg(wowah_csv$level))
+
+head(wowah_grp_race_charclass_ave_level)
+```
+
+## Sortowanie ramek danych
+
+Ramki możemy posortować względem wielu kolumn. Służy do tego instrukcja `arrange` (lub `orderBy`).
+
+```{r, r_arrange}
+wowah_grp_race_charclass_ave_level <- wowah_grp_race_charclass %>%
+  SparkR::summarize(mean_lvl = avg(wowah_csv$level)) %>%
+  SparkR::arrange(col = "mean_lvl", 
+                  decreasing = TRUE)
+
+head(wowah_grp_race_charclass_ave_level)
+```
+
+## Łączenie (`join`) ramek danych
+
+Bardzo często chcemy połączyć dwie ramki po jakimś kluczu. W Spark służą do tego instrukcje `merge` oraz `join`. Poniżej przykłady użycia obu instruckji.
+
+
+Na początku przygotujmy zbiór danych, który dla wybranych ras zawiera liczbę *gwiazdek* oznaczających polubienia. Będziemy chcieli tę informację dodać do głównego zbioru `wowah_csv`.
+```{r, join-df}
+race_stars <- SparkR::createDataFrame(data.frame(
+  race = c("Undead", "Blood Elf", "Tauren"),
+  stars = c(3, 5, 1)))
+
+head(race_stars)
+```
+
+### Użycie operacji `join`
+
+Operacja `join` wymaga podania argumentów:
+
+* `x` oraz `y`: ramki dane jakie będą łączone
+* `joinExpr`: wyrażenie (przy użyciu kolumn ramek `x` i `y`) służące do połączenia ramek
+* `joinType`: rodzaj złączenia: 'inner', 'cross', 'outer', 'full', 'full_outer', 'left', 'left_outer', 'right', 'right_outer', 'left_semi', lub 'left_anti'.
+
+```{r, join-ex-1}
+SparkR::join(x = wowah_csv, y = race_stars,
+             wowah_csv$` race` == race_stars$race,
+             "inner") %>%
+  head()
+```
+
+### Użycie operacji `merge`
+
+Operacja `merge` wymaga podania następujących argumentów:
+
+* `x` oraz `y`: ramki dane jakie będą łączone
+* `by`: po jakich kolumnach ma być łączenie przeprowadzone
+* `by.x` i `by.y`: odpowiednio kolumny dla `x` i dla `y`
+* `all`: czy zachować wszystkie wiersze
+* `all.x` i `all.y`: jak powyżej dla `x` i dla `y`
+* `sort`: czy posortować wynik
+* `suffixes`: jakie dodać przedrostki dla kolumn z `x` i `y` odpowiednio
+
+```{r, join-ex-1}
+SparkR::merge(x = wowah_csv, y = race_stars,
+              by = "race",
+              all.y = FALSE,
+              all.x = FALSE) %>%
+  head()
+```
+
+## Operacje na kolumnach
+
+### Operacje podstawowe
+
+Kolumny ramek danych Spark można przekształcać podobnie jak w przypadku `data.frame`. Spark dostarcza dużą liczbę operacji:
+
+* [operacje matematyczne](https://spark.apache.org/docs/latest/api/R/column_math_functions.html)
+* [operacje na napisach](https://spark.apache.org/docs/latest/api/R/column_string_functions.html)
+* [operacje agregujące](https://spark.apache.org/docs/latest/api/R/column_aggregate_functions.html)
+* [operacje na zmiennych czasowych](https://spark.apache.org/docs/latest/api/R/column_datetime_functions.html)
+* [wyliczanie różnic czasowych](https://spark.apache.org/docs/latest/api/R/column_datetime_diff_functions.html)
+* [funkcje nie agregujące](https://spark.apache.org/docs/latest/api/R/column_nonaggregate_functions.html)
+* [operacje różne](https://spark.apache.org/docs/latest/api/R/column_misc_functions.html)
+* [operacje okienkowe](https://spark.apache.org/docs/latest/api/R/column_window_functions.html)
+* [operacje na kolekcjach](https://spark.apache.org/docs/latest/api/R/column_collection_functions.html)
+
+```{r, r_df_mutate_add_col}
+wowah_csv$level_log <- log(wowah_csv$level)
+wowah_csv$zone <- lower(wowah_csv$zone)
+wowah_csv$timestamp <- to_timestamp(wowah_csv$timestamp,
+                                    format = "MM/dd/yy HH:mm:ss")
+head(wowah_csv)
+```
+
+### Operacje na kolekcjach
+
+Bardzo ciekawą funkcjonalnością jest praca na kolekcjach. Dzięki tej opcji można robić bardzo skomplikowane przekształcenia danych.
+
+Podstawowe kolekcje dostępne:
+
+* `array` - tablica wartości tego samego typu
+* `struct` - lista wartości różnego typu
+* `map` - słownik
+
+
+**Uwaga** kolekcje w SparkR są słabo wsparte i ogranczę się tylko do `array`. 
+
+```{r, r_coll_df}
+df <- createDataFrame(cbind(model = rownames(mtcars), mtcars))
+
+head(df)
+```
+
+#### Podstawowe typy kolekcji
+
+```{r, r_coll_types}
+tmp <- mutate(df, v1 = struct(df$mpg, df$cyl), v2 = struct("hp", "wt", "vs"),
+              v3 = create_array(df$mpg, df$cyl, df$hp),
+              v4 = create_map(lit("x"), lit(1.0), lit("y"), lit(-1.0)))
+
+head(tmp)
+str(head(tmp))
+head(tmp)$v3[[1]]
+ls(envir = head(tmp)$v4[[1]])
+get(x = "x", envir = head(tmp)$v4[[1]])
+```
+
+#### Operacje na kolekcji `array`
+
+Kolekcja typu `array` służy do tego, żeby przechowywać wektory informacji. Przykłady:
+
+* Dla każdego klienta lista kupionych produktów
+* Dla każdego artysty lista napisanych piosenek
+
+Dzięki tej funkcjonalności Spark wychodzi dużo poza możliwości zwykłego SQL, w którym tego typu operacje są bardzo skomplikowane.
+
+```{r, r_coll_array}
+tmp <- df %>%
+  mutate(v1 = create_array(df$mpg, df$cyl, df$hp))
+tmp %>%
+  select(array_contains(tmp$v1, 21), size(tmp$v1), shuffle(tmp$v1)) %>%
+  head()
+
+tmp %>%
+  select(array_max(tmp$v1),
+         array_distinct(tmp$v1)) %>%
+  head()
+
+tmp %>% 
+  mutate(v2 = explode(tmp$v1)) %>%
+  head()
+```
+
+##### Przykład - zliczanie słów
+
+Plik `/data/log.txt` zawiera przykładowy log z działania programu. Zadanie polega na tym, żeby policzyć ile słów zawiera ten plik.
+
+```{r r_array_ex_load_data}
+log_df <- SparkR::read.text("/data/log.txt")
+
+nrow(log_df)
+
+head(log_df)
+```
+
+Zbiór logów to ramka z kolumną `value` zawierającą kolejne wiersze z pliku `log.txt`. Aby policzyć liczbę słów zaczniemy od podzielenia każdego wiersza na słowa.
+
+```{r, r_array_ex_split}
+log_df$words <- SparkR::split_string(x = log_df$value, 
+                                     pattern = " ")
+
+head(log_df)
+
+select(log_df, size(log_df$words)) %>%
+  head()
+```
+
+Teraz dla każdego wiersza utworzymy jego kopię poprzez wypisanie wszystkich słów z kolumny `words`.
+
+```{r, r_array_ex_explode}
+log_df_words <- log_df %>%
+  SparkR::mutate(word = explode(log_df$words))
+
+head(log_df_words)
+
+nrow(log_df_words)
+```
+
+Na koniec musimy zliczyć słowa
+
+```{r, r_array_ex_count}
+log_df_words %>%
+  SparkR::group_by("word") %>%
+  SparkR::summarize(cnt = count(log_df_words$word)) %>%
+  SparkR::arrange("cnt", decreasing = TRUE) %>%
+  select(word, cnt) %>%
+  collect()
+```
+
+### Operacje okienkowe (ang. *Window Functions*)
+
+Operacje okienkowe rozszerzają operacje typu `group_by`. Dzięki tej funkcjonalności można policzyć średnie kroczące, skumulowaną sumę czy wartości wiersza przed aktualnym wierszem. To są bardzo zaawansowane funkcje i często są przydatne do zaawansowanych transformacji na danych.
+
+#### Przykład - analiza sprzedażowa
+
+Załóżmy, że dysponujemy takimi danymi ([źródło](https://databricks.com/blog/2015/07/15/introducing-window-functions-in-spark-sql.html)) jak poniżej.
+
+```{r, r_winfun_df}
+winfun_df <- SparkR::createDataFrame(x = data.frame(
+  product = c("Thin", "Normal", "Mini", "Ultra thin", "Very thin", "Big", "Bendable", "Foldable", "Pro", "Pro2"),
+  category = c("Cell phone", "Tablet", "Tablet", "Cell phone", "Cell phone", "Tablet", "Cell phone", "Cell phone", "Tablet", "Tablet"),
+  revenue = c(6000, 1500, 5500, 5000, 6000, 2500, 3000, 3000, 4500, 6500)))
+
+head(winfun_df)
+```
+
+Chcemy odpowiedzieć na następujące pytania:
+
+* Który produkt jest najlepiej a który drugi z kolei jeśli chodzi o wielkośc sprzedaży?
+* Jaka jest różnica między zyskiem dla danego produktu a zyskiem dla najlepszego produktu?
+
+Tego typu pytania są bardzo trudne do implementacji w standardowym SQL. Dzięki użyciu funkcji okienkowych Spark pozwala sprawnie obsłużyć podobne zapytania.
+
+Odpowiedź na pytanie pierwsze:
+
+```{r, r_winfun_q1}
+ws <- orderBy(windowPartitionBy(col = winfun_df$category),
+              -winfun_df$revenue)
+
+tmp <- winfun_df %>%
+  mutate(rank = over(dense_rank(), ws)) %>%
+  arrange("revenue", decreasing = TRUE)
+
+tmp %>%
+  filter(tmp$rank <= 2) %>%
+  select(tmp$product, tmp$category, tmp$revenue) %>%
+  head()
+```
+
+Odpowiedź na drugie pytanie:
+
+```{r, r_winfun_q2}
+ws <- windowPartitionBy(col = winfun_df$category) %>%
+  orderBy(-winfun_df$revenue) %>%
+  rangeBetween(start = -100000, end = 100000)
+
+winfun_df %>%
+  mutate(reve_diff = over(max(winfun_df$revenue), ws) - winfun_df$revenue) %>%
+  arrange("product", "category", "revenue", decreasing = TRUE) %>%
+  head()
+```
+
+# Zakończenie połączenia 
+
+```{r, spark-session-stop}
+SparkR::sparkR.session.stop()
+```
