@@ -1,0 +1,314 @@
+---
+title: "Rozpraszanie wielu obliczeń jednej funkcji"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Przygotowanie środowiska 
+
+## Inicjalizacja R Suite
+
+```{r message=FALSE, warning=FALSE, include=FALSE, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Podłączenie się do Spark
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+library(SparkR)
+
+SparkR::sparkR.session(master = "spark://spark-master:7077")
+```
+
+# Zrównoleglanie prostej lokalnej funkcji
+
+## Przykład - liczenie PI 
+
+Opracuj dwie funkcje: `pi_local`, `pi_sparkr`, które będą wyliczały wartość liczby Pi używając metody monte carlo w wersji odpowiednio lokalnej pętli `for`, rozproszonej pętli `for` (użycie `spark.lapply`). Algorytm jest następujący:
+
+0. Przyjmij cnt = 0, N (N jest duże, np. 1e6)
+1. Dla i = 1 do N
+1. Wylosuj punkt z = (x, y), gdzie x i y są z rozkładu jednostajnego na zbiorze [0,1]
+2. Wylicz długość wektora z
+3. Jeśli długość wektora z jest mniejsza od 1 to zwiększ `cnt` o 1
+2. Zwróć wartość wyrażenia: cnt*4/N
+
+### Rozwiązanie
+
+**Uwaga** podane rozwiązanie jest napisane **specjalnie** nieefektywnie aby pokazać przyśpieszenia przy użyciu Spark.
+
+####Liczenie PI lokalnie
+
+```{r, local_pi_fun}
+pi_local <- function(N, n) {
+  cnt <- 0
+  for (k in 1:n) {
+    Sys.sleep(N)
+  }
+  cnt * 4.0 / N / n / 10
+}
+```
+
+```{r, local_pi_calc}
+start_time <- Sys.time()
+pi_aprx <- pi_local(1, 100)
+end_time <- Sys.time()
+
+loginfo("PI approx %f", pi_aprx)
+loginfo("Local PI took %s -> %s [%s]", start_time, end_time, end_time - start_time)
+```
+#### Liczenie PI na Spark
+
+```{r, spark_pi_function_sparkr}
+pi_sparkr <- function(N, n) {
+  print(N)
+  print(n)
+  v <- SparkR::spark.lapply(list = 1:n,
+                            func = function(k) {
+                              Sys.sleep(N)
+                              0
+                            })
+  return(0)
+}
+```
+
+
+```{r, spark_pi_calc} 
+start_time <- Sys.time()
+pi_aprx <- pi_sparkr(1, 100)
+end_time <- Sys.time()
+
+loginfo("PI approx %f", pi_aprx)
+loginfo("Spark PI took %s -> %s [%s ]", start_time, end_time, end_time - start_time)
+```
+
+
+## Użycie pakietów zewnętrznych w zrównoleglanej funkcji
+
+### Przygotowanie
+
+Zdefiniujemy funkcję, która zbuduje model `randomForest` dla zbioru `iris`. Funkcja ta jako argument przyjmie liczbę drzew `ntree`.
+
+```{r, lapply_pkg_fun}
+library(randomForest)
+
+train <- function(ntree) {
+  model <- randomForest::randomForest(Sepal.Length ~ Sepal.Width + Species, data = iris)
+  summary(model)
+}
+```
+
+Następnie zdefiniujemy listę możliwych wartości dla liczby drzew:
+
+```{r, ntrees_vec}
+ntrees <- c(100, 500)
+```
+
+### Uruchamianie lokalnie
+
+Sprawdźmy czy wszystko działa lokalnie:
+
+```{r, lapply_pkg_run_local}
+models_local <- lapply(ntrees, train)
+```
+
+Jak widać wszystko działa poprawnie. 
+
+### Uruchamianie na Spark - pierwsze podejście
+
+Spróbujmy uruchomić powyższą funkcję używając instrukcji `spark.lapply`.
+
+```{r, lapply_pkg_run_spark_1}
+models_spark <- SparkR::spark.lapply(ntrees,
+                                     train)
+print(models_spark)
+```
+
+Nie udało się. Analiza logów w oknie konsoli wskazuje błąd o następującej treści:
+
+```
+Error in loadNamespace(name) : there is no package called 'randomForest'
+```
+
+### Uruchamianie na Spark - podejście drugie
+
+Drugie podejście polega na:
+
+1. Przygotowaniu paczki wdrożeniowej z projektu R Suite
+2. Instalacji tej paczki na każdym workerze
+3. Ustawieniu `.libPaths` na każdym workerze tak, aby wskazywał na katalog `deployment\libs`
+
+#### Przygotowanie paczki wdrożeniowej
+
+Poprzez `Addins > Build ZIP` lub używając narzędzia CLI
+
+```bash
+rsuite proj zip --version=1.0 
+```
+
+Paczka leży w katalogu głównym projektu (czyli `..\script_path`)
+
+#### Instalacja paczki 
+
+```{r, spark_install_deployment}
+file.copy(from = file.path(script_path, "..", "WNE_SparkR_Workshop_1.0x.zip"),
+          to = file.path("/prod", "WNE_SparkR_Workshop_1.0x.zip"))
+
+unzip(zipfile = file.path("/prod", "WNE_SparkR_Workshop_1.0x.zip"), 
+      exdir = "/prod")
+
+file.remove(file.path("/prod", "WNE_SparkR_Workshop_1.0x.zip"))
+```
+
+#### Uruchomienie obliczeń
+Przygotujmy pomocniczą funkcję, która ustawia odpowiednio ścieżki - roboczą oraz z pakietami dla danego projektu `R Suite`.
+
+```{r, prj_setup}
+prj_setup <- function(prj_name) {
+  prj_dir <- sprintf("/prod/%s", prj_name)
+  print(prj_dir)
+  setwd(prj_dir)
+  .libPaths(sprintf("/prod/%s/libs", prj_name))
+}
+```
+
+
+```{r, lapply_pkg_run_spark_2}
+models_spark <- SparkR::spark.lapply(ntrees,
+                                     function(ntree) {
+                                       prj_setup("WNE_SparkR_Workshop")
+                                       train(ntree)
+                                     })
+print(models_spark)
+```
+
+Jak widać teraz wszystko działa poprawnie. 
+
+## Użycie pakietów własnych w zrównoleglanej funkcji
+
+Procedura opisana w poprzednim paragrafie przenosi się także na pakiety własne - tworzone w ramach projektu R Suite. 
+
+### Dodajmy pakiet do projektu R Suite
+
+Pakiet dodajemy poprzez `Addins > Start RSuite package`. Ja użyłem nazwy `DistributedR`. Pakiet tworzy się w katalogu `packages` co można sprawdzić 
+instrukcją
+
+```{r, pkg_check}
+dir(file.path(script_path, "..", "packages"))
+```
+
+### Dodajmy funkcję do pakietu
+
+W katalogu `packages/DistributedR/R` tworzymy plik `train_tree.R` o następującej treści
+
+```{r eval=FALSE, include=FALSE}
+#' @export
+
+train_tree <- function(ntree) {
+  model <- randomForest::randomForest(Sepal.Length ~ Sepal.Width + Species, data = iris)
+  summary(model)
+}
+```
+
+Dodatkowo należy dodać zależności dla pakietu edytując plik `packages/DistributedR/DESCRIPTION` rozszerzając sekcję `Imports` o `randomForest`. Przykład poniżej:
+
+```
+Package: DistributedR
+Type: Package
+Title: What the package does (short line)
+Version: 0.1
+Date: 2019-06-02
+Author: rstudio
+Maintainer: Who to complain to <yourfault@somewhere.net>
+Description: More about what it does (maybe more than one line)
+License: What license is it under?
+Imports: 
+  logging,
+  randomForest
+```
+
+### Zbudujmy pakiet
+
+Pakiet należy zbudować. Służy do tego instrukcja `Addins > Build packages`. W katalogu `deployment/libs` pojawi się katalog `DistributedR` z naszym lokalnym pakietem. Przykład poniżej.
+
+```{r, pkg_check_built}
+dir(file.path(script_path, "..", "deployment", "libs"))
+```
+
+### Użycie pakietu na klastrze Spark - pierwsze podejście
+
+Spróbujmy zmodyfikować poprzedni kod dodając wywołanie `DistributedR::train_tree`. Przykład poniżej.
+```{r, pkg_spark_1}
+models_spark <- SparkR::spark.lapply(ntrees,
+                                     function(ntree) {
+                                       prj_setup("WNE_SparkR_Workshop")
+                                       DistributedR::train_tree(ntree)
+                                     })
+print(models_spark)
+```
+
+Jak widać nie działa ponieważ nie ma pakietu `DistributedR` na produkcji!
+
+### Przygotowanie paczki wdrożeniowej
+
+Poprzez `Addins > Build ZIP` lub używając narzędzia CLI
+
+```bash
+rsuite proj zip --version=2.0 
+```
+
+Paczka leży w katalogu głównym projektu (czyli `..\script_path`)
+
+### Instalacja paczki 
+
+```{r, spark_install_deployment}
+file.copy(from = file.path(script_path, "..", "WNE_SparkR_Workshop_2.0x.zip"),
+          to = file.path("/prod", "WNE_SparkR_Workshop_2.0x.zip"))
+
+unzip(zipfile = file.path("/prod", "WNE_SparkR_Workshop_2.0x.zip"), 
+      exdir = "/prod/WNE_SparkR_Workshop_2.0")
+
+file.remove(file.path("/prod", "WNE_SparkR_Workshop_2.0x.zip"))
+```
+
+### Użycie pakietu na klastrze Spark - drugie podejście
+
+Sprawdźmy czy po wykonaniu poprzednik kroków będziemy mogli użyć funkcji z naszego pakietu. 
+**Ważne** zwróć uwagę na ścieżki. Powinno być ustawione na `"WNE_SparkR_Workshop/WNE_SparkR_Workshop_2.0"`.
+
+```{r, pkg_spark_2}
+models_spark <- SparkR::spark.lapply(ntrees,
+                                     function(ntree) {
+                                       prj_setup("WNE_SparkR_Workshop_2.0/WNE_SparkR_Workshop")
+                                       DistributedR::train_tree(ntree)
+                                     })
+print(models_spark)
+```
+
+Jak widać teraz wszystko zadziało poprawnie. 
+
+# Zakończenie pracy
+
+## Zamknięcie połączenia do Spark
+
+```{r, spark_stop}
+SparkR::sparkR.session.stop()
+```

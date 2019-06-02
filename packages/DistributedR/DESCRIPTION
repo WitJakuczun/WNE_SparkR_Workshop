@@ -1,0 +1,13 @@
+Package: DistributedR
+Type: Package
+Title: What the package does (short line)
+Version: 0.1
+Date: 2019-06-02
+Author: rstudio
+Maintainer: Who to complain to <yourfault@somewhere.net>
+Description: More about what it does (maybe more than one line)
+License: What license is it under?
+Imports: 
+  logging,
+  randomForest
+RoxygenNote: 6.1.1
