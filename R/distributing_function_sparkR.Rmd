@@ -241,8 +241,8 @@ Maintainer: Who to complain to <yourfault@somewhere.net>
 Description: More about what it does (maybe more than one line)
 License: What license is it under?
 Imports: 
-  logging,
-  randomForest
+logging,
+randomForest
 ```
 
 ### Zbudujmy pakiet
@@ -304,6 +304,250 @@ print(models_spark)
 ```
 
 Jak widać teraz wszystko zadziało poprawnie. 
+
+# Zrównoleglanie obliczeń na `data.frame`
+
+Bardzo przydatną funkcjonalnością jest możliwość rozproszenia obliczeń danej funkcji na ramce danych. Służą do tego dwie podstawowe operacje:
+
+* obliczenia rozrzucone po partycjach
+* obliczenia rozrzucone wg schematu `groupby`.
+
+## Stworzenie ramki danych
+
+Na początku utwórzmy sztuczną ramkę danych o nazwie `large_df`
+
+```{r, large_df_create}
+large_df <- SparkR::createDataFrame(x = data.frame(grupa = base::sample(x=c("a", "b", "c", "d"), size = 1000, replace = TRUE),
+                                                   miara = rnorm(n = 1000, mean = 0, sd = 1)))
+head(large_df)
+```
+
+Stwórzmy także opis schematu ramki (meta dane)
+
+```{r, large_df_schema}
+large_df_schema <- structType(structField("grupa", "string"),
+                              structField("miara", "double"))
+```
+
+## Zrównoleglanie przetwarzania ramki danych w oparciu o partycje
+
+Wzorzec ten jest przydatny gdy:
+
+a) obliczenia dla każdego wiersza ramki danych są niezależne (np. mnożymy kolumnę przez skalar),
+b) mamy doczynienia z ramką, która jest **zbyt duża** aby zmieścić się w pamięci komputera
+
+Załóżmy, że chcemy stworzyć nową kolumnę `miara_x2`, która powstanie poprzez przemnożenie kolumny `miara` przez liczbę 2.
+
+W pierwszym kroku określimy jaka będzie struktura tabeli:
+
+```{r, dapply_ex1_schema}
+large_df_schema <- structType(structField("grupa", "string"),
+                              structField("miara", "double"),
+                              structField("miara_x2", "double"))
+```
+
+Teraz możemy wykonać obliczenia
+
+```{r, dapply_ex1_eval}
+large_df_1 <- SparkR::dapply(large_df, 
+                             function(x) { 
+                               ## wynik musi byc typu `data.frame`
+                               x <- cbind(x, x$miara * 2)
+                             }, 
+                             large_df_schema)
+```
+
+Zobaczmy jaki otrzymaliśmy wynik
+
+```{r, dapply_ex1_head}
+head(large_df_1)
+```
+
+### Rozumienie działania partycji
+
+Sprawdźmy jak działa rozpraszanie w oparciu o partycje. W tym celu dodamy kolumnę `rows`, która powie ile wierszy jest przetwarzanych przez funkcję. Zobaczymy czy ta liczba zmienia się w zależności od liczby partycji.
+
+Na początku dokonajmy repartycji ramki `large_df`
+
+```{r, dapply_repart}
+large_df_repart <- SparkR::repartition(large_df, numPartitions = 4)
+```
+
+
+Utwórzmy schemat dla nowego wyniku obliczeń:
+
+```{r, dapply_ex2_schema}
+large_df_schema <- structType(structField("grupa", "string"),
+                              structField("miara", "double"),
+                              structField("miara_x2", "double"),
+                              structField("rows", "integer"))
+```
+
+Teraz możemy wykonać obliczenia
+
+```{r, dapply_ex2_eval}
+large_df_repart_1 <- SparkR::dapply(large_df_repart, 
+                                    function(x) { 
+                                      ## wynik musi byc typu `data.frame`
+                                      x <- cbind(x, x$miara * 2, nrow(x))
+                                    }, 
+                                    large_df_schema)
+```
+
+Zobaczmy wynik
+
+```{r, dapply_ex2_head}
+head(large_df_repart_1)
+```
+
+Jak widać `rows` przyjmuje wartość `250`. Oznacza to, że oryginalna tabela została podzielona na `4` grupy i każda była przetwarzana osobno.
+
+## Automatyczne pobranie obliczeń
+
+Zamiast funkcji `dapply` można użyć `dapplyCollect`. 
+
+```{r, dapply_collect_ex1_eval}
+large_df_repart_collect <- SparkR::dapplyCollect(large_df_repart, 
+                                                 function(x) { 
+                                                   ## wynik musi byc typu `data.frame`
+                                                   x <- cbind(x, x$miara * 2, nrow(x))
+                                                 })
+```
+
+Sprawdźmy jakiego typu jest `large_df_repart_collect`
+
+```{r, dapply_collect_ex1_type}
+str(large_df_repart_collect)
+```
+Jak widać jest to ramka danych (`data.frame`). Wyniki zostały automatycznie pobrane ze Spark do pamięci R.
+
+## Zrównoleglanie przetwarzania ramki danych w oparciu o grupowanie
+
+Czasami chcemy przetworzyć ramkę uwzględniając jej strukturę - na przykład chcemy policzyć średnie w grupach. Do tego celu służy funkcja `gapply` oraz `gapplyCollect`.
+
+Załóżmy, że chcemy dla każdej wartości z kolumny `grupa` policzyć `miara_ave`, która będzie średnią `miara` dla wierszy, które mają tą samą wartość w kolumnie `grupa`.
+
+W pierwszym kroku określimy jaka będzie struktura tabeli wynikowej:
+
+```{r, dapply_ex1_schema}
+large_df_schema <- structType(structField("grupa", "string"),
+                              structField("miara_ave", "double"))
+```
+
+Teraz możemy wykonać obliczenia
+
+```{r, dapply_ex1_eval}
+large_df_1 <- SparkR::gapply(large_df, 
+                             "grupa",
+                             function(key, x) { 
+                               ## wynik musi byc typu `data.frame`
+                               x <- data.frame(key, mean(x$miara), 
+                                               stringsAsFactors = FALSE)
+                             }, 
+                             large_df_schema)
+```
+
+Zobaczmy jaki otrzymaliśmy wynik
+
+```{r, dapply_ex1_head}
+head(large_df_1)
+```
+
+### Automatyczne pobranie obliczeń
+
+Użycie `gapplyCollect` pozwala na automatyczne przesłanie wyniku do pamięci R
+
+```{r, dapply_ex1_eval}
+large_df_2 <- SparkR::gapplyCollect(large_df, 
+                                    "grupa",
+                                    function(key, x) { 
+                                      ## wynik musi byc typu `data.frame`
+                                      x <- data.frame(key, mean(x$miara), 
+                                                      stringsAsFactors = FALSE)
+                                      colnames(x) <- c("grupa", "miara_ave")
+                                      x
+                                    })
+```
+
+Zobaczmy jaki otrzymaliśmy wynik
+
+```{r, dapply_ex1_head}
+print(str(large_df_2))
+head(large_df_2)
+```
+
+## Użycie własnej funcji
+
+Aby użyć własnej funkcji używając metod `dapply*` lub `gapply*` należy postąpić podobnie jak w przypadku `spark.lapply`.
+
+### Stwórzmy nową funkcję w pakiecie `DistributedR`
+
+W pliku `packages\DistributedR\R\max_in_grp.R` stwórzmy następujący kod
+
+```{r, include=FALSE}
+#' @export
+max_in_grp <- function(x) {
+  max(x$miara)
+}
+```
+
+Funkcja ta wyliczy maksymalną wartość z kolumny `miara`.
+
+#### Przygotowanie paczki wdrożeniowej
+
+Poprzez `Addins > Build ZIP` lub używając narzędzia CLI
+
+```bash
+rsuite proj zip --version=3.0 
+```
+
+Paczka leży w katalogu głównym projektu (czyli `..\script_path`)
+
+#### Instalacja paczki 
+
+```{r, spark_install_deployment}
+file.copy(from = file.path(script_path, "..", "WNE_SparkR_Workshop_3.0x.zip"),
+          to = file.path("/prod", "WNE_SparkR_Workshop_3.0x.zip"))
+
+unzip(zipfile = file.path("/prod", "WNE_SparkR_Workshop_3.0x.zip"), 
+      exdir = "/prod/WNE_SparkR_Workshop_3.0")
+
+file.remove(file.path("/prod", "WNE_SparkR_Workshop_3.0x.zip"))
+```
+
+#### Uruchomienie obliczeń
+Przygotujmy pomocniczą funkcję, która ustawia odpowiednio ścieżki - roboczą oraz z pakietami dla danego projektu `R Suite`.
+
+```{r, prj_setup}
+prj_setup <- function(prj_name) {
+  prj_dir <- sprintf("/prod/%s", prj_name)
+  print(prj_dir)
+  setwd(prj_dir)
+  .libPaths(sprintf("/prod/%s/libs", prj_name))
+}
+```
+
+
+```{r, gapply_custom_fun}
+large_df_3 <- SparkR::gapplyCollect(large_df, 
+                                    "grupa",
+                                    function(key, x) { 
+                                      prj_setup("WNE_SparkR_Workshop_3.0/WNE_SparkR_Workshop")
+                                      ## wynik musi byc typu `data.frame`
+                                      x <- data.frame(key, 
+                                                      DistributedR::max_in_grp(x), 
+                                                      stringsAsFactors = FALSE)
+                                      colnames(x) <- c("grupa", "miara_max")
+                                      x
+                                    })
+```
+
+Zobaczmy jaki otrzymaliśmy wynik
+
+```{r, dapply_ex1_head}
+print(str(large_df_3))
+head(large_df_3)
+```
 
 # Zakończenie pracy
 
