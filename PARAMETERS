@@ -1,0 +1,5 @@
+RSuiteVersion: 0.36.252
+RVersion: 3.5
+Project: WNE_SparkR_Workshop
+Repositories: Url[https://wne-spark-bootcamp.s3.amazonaws.com/CRAN], MRAN[2019-06-02], CRAN
+Artifacts: config_templ.txt
