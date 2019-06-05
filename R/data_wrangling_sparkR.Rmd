@@ -119,15 +119,15 @@ wowah_csv <- SparkR::loadDF(path = file.path("/data/wowah_data.csv"),
                             header = "true",
                             na.strings = "NA",
                             schema = structType(
-                              structField("char", "string"),
-                              structField("level", "integer"),
-                              structField("race", "string"),
-                              structField("charclass", "string"),
-                              structField("zone", "string"),
-                              structField("guild", "integer"),
-                              structField("timestamp", "string")
+                                structField("char", "string"),
+                                structField("level", "integer"),
+                                structField("race", "string"),
+                                structField("charclass", "string"),
+                                structField("zone", "string"),
+                                structField("guild", "integer"),
+                                structField("timestamp", "string")
                             )) %>%
-  cache()
+    cache()
 
 head(wowah_csv)
 print(schema(wowah_csv))
@@ -148,7 +148,7 @@ Dodatkowo można przekształcać kolumny podobnie jak w `data.frame`.
 
 ```{r, df_select}
 wowah_char_level <- wowah_csv %>%
-  SparkR::select("char", "level")
+SparkR::select("char", "level")
 
 head(wowah_char_level)
 ```
@@ -157,16 +157,17 @@ head(wowah_char_level)
 
 ```{r, df_filter}
 wowah_level_ge_10 <- wowah_csv %>%
-  SparkR::filter(wowah_csv$level > 10)
+SparkR::filter(wowah_csv$level > 10)
 
 head(wowah_level_ge_10)
 ```
 ## Grupowanie i agregacja danych
 
 Użycie funkcji `groupBy`/`group_by` tworzy ramkę *pogrupowaną*.
+
 ```{r, df_groupBy}
 wowah_grp_race_charclass <- wowah_csv %>%
-  SparkR::group_by("race", "charclass")
+SparkR::group_by("race", "charclass")
 
 str(wowah_grp_race_charclass)
 ```
@@ -175,7 +176,7 @@ Na takiej ramce można wywoływać różne operacje
 
 ```{r, df_summarise}
 wowah_grp_race_charclass_ave_level <- wowah_grp_race_charclass %>%
-  SparkR::summarize(mean_lvl = avg(wowah_csv$level))
+SparkR::summarize(mean_lvl = avg(wowah_csv$level))
 
 head(wowah_grp_race_charclass_ave_level)
 ```
@@ -186,13 +187,12 @@ Ramki możemy posortować względem wielu kolumn. Służy do tego instrukcja `ar
 
 ```{r, r_arrange}
 wowah_grp_race_charclass_ave_level <- wowah_grp_race_charclass %>%
-  SparkR::summarize(mean_lvl = avg(wowah_csv$level)) %>%
-  SparkR::arrange(col = "mean_lvl", 
-                  decreasing = TRUE)
+SparkR::summarize(mean_lvl = avg(wowah_csv$level)) %>%
+SparkR::arrange(col = "mean_lvl", 
+decreasing = TRUE)
 
 head(wowah_grp_race_charclass_ave_level)
 ```
-
 ## Łączenie (`join`) ramek danych
 
 Bardzo często chcemy połączyć dwie ramki po jakimś kluczu. W Spark służą do tego instrukcje `merge` oraz `join`. Poniżej przykłady użycia obu instruckji.
@@ -201,8 +201,8 @@ Bardzo często chcemy połączyć dwie ramki po jakimś kluczu. W Spark służą
 Na początku przygotujmy zbiór danych, który dla wybranych ras zawiera liczbę *gwiazdek* oznaczających polubienia. Będziemy chcieli tę informację dodać do głównego zbioru `wowah_csv`.
 ```{r, join-df}
 race_stars <- SparkR::createDataFrame(data.frame(
-  race = c("Undead", "Blood Elf", "Tauren"),
-  stars = c(3, 5, 1)))
+race = c("Undead", "Blood Elf", "Tauren"),
+stars = c(3, 5, 1)))
 
 head(race_stars)
 ```
@@ -217,9 +217,9 @@ Operacja `join` wymaga podania argumentów:
 
 ```{r, join-ex-1}
 SparkR::join(x = wowah_csv, y = race_stars,
-             wowah_csv$` race` == race_stars$race,
-             "inner") %>%
-  head()
+wowah_csv$` race` == race_stars$race,
+"inner") %>%
+head()
 ```
 
 ### Użycie operacji `merge`
@@ -236,12 +236,11 @@ Operacja `merge` wymaga podania następujących argumentów:
 
 ```{r, join-ex-1}
 SparkR::merge(x = wowah_csv, y = race_stars,
-              by = "race",
-              all.y = FALSE,
-              all.x = FALSE) %>%
-  head()
+by = "race",
+all.y = FALSE,
+all.x = FALSE) %>%
+head()
 ```
-
 ## Operacje na kolumnach
 
 ### Operacje podstawowe
@@ -262,7 +261,7 @@ Kolumny ramek danych Spark można przekształcać podobnie jak w przypadku `data
 wowah_csv$level_log <- log(wowah_csv$level)
 wowah_csv$zone <- lower(wowah_csv$zone)
 wowah_csv$timestamp <- to_timestamp(wowah_csv$timestamp,
-                                    format = "MM/dd/yy HH:mm:ss")
+format = "MM/dd/yy HH:mm:ss")
 head(wowah_csv)
 ```
 
@@ -277,7 +276,9 @@ Podstawowe kolekcje dostępne:
 * `map` - słownik
 
 
-**Uwaga** kolekcje w SparkR są słabo wsparte i ogranczę się tylko do `array`. 
+**Uwaga** kolekcje w SparkR są słabo wsparte i ogranczę się tylko do `array`.
+
+#### Podstawowe typy kolekcji
 
 ```{r, r_coll_df}
 df <- createDataFrame(cbind(model = rownames(mtcars), mtcars))
@@ -285,12 +286,10 @@ df <- createDataFrame(cbind(model = rownames(mtcars), mtcars))
 head(df)
 ```
 
-#### Podstawowe typy kolekcji
-
 ```{r, r_coll_types}
 tmp <- mutate(df, v1 = struct(df$mpg, df$cyl), v2 = struct("hp", "wt", "vs"),
-              v3 = create_array(df$mpg, df$cyl, df$hp),
-              v4 = create_map(lit("x"), lit(1.0), lit("y"), lit(-1.0)))
+v3 = create_array(df$mpg, df$cyl, df$hp),
+v4 = create_map(lit("x"), lit(1.0), lit("y"), lit(-1.0)))
 
 head(tmp)
 str(head(tmp))
@@ -310,19 +309,19 @@ Dzięki tej funkcjonalności Spark wychodzi dużo poza możliwości zwykłego SQ
 
 ```{r, r_coll_array}
 tmp <- df %>%
-  mutate(v1 = create_array(df$mpg, df$cyl, df$hp))
+    mutate(v1 = create_array(df$mpg, df$cyl, df$hp))
 tmp %>%
-  select(array_contains(tmp$v1, 21), size(tmp$v1), shuffle(tmp$v1)) %>%
-  head()
+    select(array_contains(tmp$v1, 21), size(tmp$v1), shuffle(tmp$v1)) %>%
+    head()
 
 tmp %>%
-  select(array_max(tmp$v1),
-         array_distinct(tmp$v1)) %>%
-  head()
+    select(array_max(tmp$v1),
+           array_distinct(tmp$v1)) %>%
+    head()
 
 tmp %>% 
-  mutate(v2 = explode(tmp$v1)) %>%
-  head()
+    mutate(v2 = explode(tmp$v1)) %>%
+    head()
 ```
 
 ##### Przykład - zliczanie słów
@@ -341,19 +340,19 @@ Zbiór logów to ramka z kolumną `value` zawierającą kolejne wiersze z pliku 
 
 ```{r, r_array_ex_split}
 log_df$words <- SparkR::split_string(x = log_df$value, 
-                                     pattern = " ")
+pattern = " ")
 
 head(log_df)
 
 select(log_df, size(log_df$words)) %>%
-  head()
+head()
 ```
 
 Teraz dla każdego wiersza utworzymy jego kopię poprzez wypisanie wszystkich słów z kolumny `words`.
 
 ```{r, r_array_ex_explode}
 log_df_words <- log_df %>%
-  SparkR::mutate(word = explode(log_df$words))
+SparkR::mutate(word = explode(log_df$words))
 
 head(log_df_words)
 
@@ -364,11 +363,11 @@ Na koniec musimy zliczyć słowa
 
 ```{r, r_array_ex_count}
 log_df_words %>%
-  SparkR::group_by("word") %>%
-  SparkR::summarize(cnt = count(log_df_words$word)) %>%
-  SparkR::arrange("cnt", decreasing = TRUE) %>%
-  select(word, cnt) %>%
-  collect()
+SparkR::group_by("word") %>%
+SparkR::summarize(cnt = count(log_df_words$word)) %>%
+SparkR::arrange("cnt", decreasing = TRUE) %>%
+select(word, cnt) %>%
+collect()
 ```
 
 ### Operacje okienkowe (ang. *Window Functions*)
@@ -381,9 +380,9 @@ Załóżmy, że dysponujemy takimi danymi ([źródło](https://databricks.com/bl
 
 ```{r, r_winfun_df}
 winfun_df <- SparkR::createDataFrame(x = data.frame(
-  product = c("Thin", "Normal", "Mini", "Ultra thin", "Very thin", "Big", "Bendable", "Foldable", "Pro", "Pro2"),
-  category = c("Cell phone", "Tablet", "Tablet", "Cell phone", "Cell phone", "Tablet", "Cell phone", "Cell phone", "Tablet", "Tablet"),
-  revenue = c(6000, 1500, 5500, 5000, 6000, 2500, 3000, 3000, 4500, 6500)))
+product = c("Thin", "Normal", "Mini", "Ultra thin", "Very thin", "Big", "Bendable", "Foldable", "Pro", "Pro2"),
+category = c("Cell phone", "Tablet", "Tablet", "Cell phone", "Cell phone", "Tablet", "Cell phone", "Cell phone", "Tablet", "Tablet"),
+revenue = c(6000, 1500, 5500, 5000, 6000, 2500, 3000, 3000, 4500, 6500)))
 
 head(winfun_df)
 ```
@@ -399,29 +398,29 @@ Odpowiedź na pytanie pierwsze:
 
 ```{r, r_winfun_q1}
 ws <- orderBy(windowPartitionBy(col = winfun_df$category),
-              -winfun_df$revenue)
+-winfun_df$revenue)
 
 tmp <- winfun_df %>%
-  mutate(rank = over(dense_rank(), ws)) %>%
-  arrange("revenue", decreasing = TRUE)
+mutate(rank = over(dense_rank(), ws)) %>%
+arrange("revenue", decreasing = TRUE)
 
 tmp %>%
-  filter(tmp$rank <= 2) %>%
-  select(tmp$product, tmp$category, tmp$revenue) %>%
-  head()
+filter(tmp$rank <= 2) %>%
+select(tmp$product, tmp$category, tmp$revenue) %>%
+head()
 ```
 
 Odpowiedź na drugie pytanie:
 
 ```{r, r_winfun_q2}
 ws <- windowPartitionBy(col = winfun_df$category) %>%
-  orderBy(-winfun_df$revenue) %>%
-  rangeBetween(start = -100000, end = 100000)
+orderBy(-winfun_df$revenue) %>%
+rangeBetween(start = -100000, end = 100000)
 
 winfun_df %>%
-  mutate(reve_diff = over(max(winfun_df$revenue), ws) - winfun_df$revenue) %>%
-  arrange("product", "category", "revenue", decreasing = TRUE) %>%
-  head()
+mutate(reve_diff = over(max(winfun_df$revenue), ws) - winfun_df$revenue) %>%
+arrange("product", "category", "revenue", decreasing = TRUE) %>%
+head()
 ```
 
 # Zakończenie połączenia 
