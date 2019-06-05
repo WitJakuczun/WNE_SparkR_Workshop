@@ -1,0 +1,92 @@
+---
+title: "Zapisywanie danych w rozbiciu na partycje"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Initialize
+
+## R Suite
+
+```{r, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Libraries
+
+
+```{r, libraries}
+library(arrow)
+library(sparklyr)
+```
+
+## Connect to Spark
+
+```{r, spark_session}
+conf <- list()
+conf$`sparklyr.shell.driver-memory` <- "3G"
+conf$spark.executor.memory <- "3G"
+
+sc <- sparklyr::spark_connect(master = "spark://spark-master:7077",
+                             app_name = "sparklyr_test",
+                             config = conf)
+```
+
+## Load dataset
+
+```{r, load_dataset}
+wow <- sparklyr::spark_read_csv(sc = sc,
+                                path = "/data/wowah_data_big.csv",
+                                name = "wow",
+                                source = "csv",
+                                header = TRUE,
+                                delimiter = ",")
+```
+
+## Export raw dataset
+
+```{r, export_raw_dataset}
+sparklyr::spark_write_parquet(x = wow,
+                              path = "/data/export/wow_raw",
+                              mode = "overwrite")
+```
+
+## Export partitioned dataset
+
+```{r, export_part_dataset}
+
+sparklyr::spark_write_parquet(x = wow,
+                              path = "/data/export/wow_part",
+                              mode = "overwrite",
+                              partition_by = c("race", "charclass"))
+```
+
+# Finish
+
+## Stop Spark session
+
+```{r, spark_session_stop}
+sparklyr::spark_disconnect(sc)
+```
+
+```{r, end}
+loginfo("Finished")
+```

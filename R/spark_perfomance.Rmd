@@ -1,0 +1,277 @@
+---
+title: "Pisanie wydajnego kodu SparkR"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Przygotowanie środowiska 
+
+## Inicjalizacja R Suite
+
+```{r message=FALSE, warning=FALSE, include=FALSE, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Podłączenie się do Spark
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+library(arrow)
+library(SparkR)
+library(magrittr)
+
+SparkR::sparkR.session(master = "spark://spark-master:7077",
+                       sparkConfig = list(spark.driver.memory = "3g",
+                                          spark.executor.memory = "3g"))
+```
+
+# Jak działają obliczenia w Spark?
+
+## Leniwe obliczanie, `actions`, `transformations`
+
+Spark obliczenia wykonuje w sposób *leniwy*. Oznacza to, że nie wykonuje żadnej pracy, dopóki nie będzie potrzebny wynik.
+
+Zacznijmy od wczytania pliku `/data/wowah_data.csv`:
+
+```{r, load_df}
+wowah_csv <- SparkR::loadDF(path = "/data/wowah_data.csv", 
+                            source = "csv",
+                            header = TRUE,
+                            schema = structType(
+                              structField("char", "string"),
+                              structField("level", "integer"),
+                              structField("race", "string"),
+                              structField("charclass", "string"),
+                              structField("zone", "string"),
+                              structField("guild", "integer"),
+                              structField("timestamp", "string")))
+
+schema(wowah_csv)
+```
+W tym momencie Spark **nie wykonał** żadnych obliczeń. Przygotował się tylko tego, że jak będziemy odwoływać się do `wowah_csv` to w pewnym momencie wczyta ten plik. Przykładowo jeśli chcemy wyświetlić `head` to wtedy Spark wczyta plik
+
+```{r, head_df}
+head(wowah_csv)
+```
+
+Wykonajmy dalsze obliczenia
+
+```{r, add_col_df}
+wowah_csv <- wowah_csv %>%
+  mutate(race=SparkR::lower(wowah_csv$race))
+```
+
+W tym momencie spark przygotował się do modyfikacji kolumny `race` ale obliczenie jeszcze nie zostało wykonane. Aby je wykonać uruchomimy instrukcję `head`
+
+```{r, add_col_df_eval}
+head(wowah_csv)
+```
+Policzmy liczbę wierszy w zbiorze `wowah_csv`
+
+```{r, count_df_1}
+count(wowah_csv)
+```
+
+Jak widać obliczenia trwają dość długo. Spróbujmy wykonać je jeszcze raz:
+
+```{r, count_df}
+count(wowah_csv)
+```
+
+Jak widać czas obliczeń jest podobny. 
+
+**Ważne** Spark tworzy graf transformacji w momencie, gdy wołamy funkcję typu `action` (np. count) wykonuje cały graf od początku. Robi tak za każdym razem.
+
+## Cache - zapisywanie wyników obliczeń
+
+Na szczęście można wymusić na Spark, aby w pewnym momencie zapisał wyniki w pamięci. Służy do tego instrukcja `cache`. Prześledźmy poniższy kod
+
+```{r, spark_cache_load_df}
+wowah_csv <- SparkR::loadDF(path = "/data/wowah_data.csv", 
+                            source = "csv",
+                            header = TRUE,
+                            schema = structType(
+                              structField("char", "string"),
+                              structField("level", "integer"),
+                              structField("race", "string"),
+                              structField("charclass", "string"),
+                              structField("zone", "string"),
+                              structField("guild", "integer"),
+                              structField("timestamp", "string")))
+
+schema(wowah_csv)
+```
+
+Następnie wymuśmy na Spark aby zapamiętał wczytany plik
+
+```{r, spark_cache_cache}
+cache(wowah_csv)
+```
+
+Policzmy liczbę wierszy licząc czas obliczeń
+
+```{r, spark_cache_count_1}
+start <- Sys.time()
+count(wowah_csv)
+end <- Sys.time()
+
+loginfo("Computing took %s", end - start)
+```
+
+Teraz powtórzmy obliczenia
+```{r, spark_cache_count_2}
+start <- Sys.time()
+count(wowah_csv)
+end <- Sys.time()
+
+loginfo("Computing took %s", end - start)
+```
+
+Jak widać nastąpiło istotne przyśpieszenie (około 100x). Spark podczas drugiego obliczenia nie wczytywał pliku, tylko użył jego kopii zapisanej w pamięci.
+
+## Czyszczenie cache
+
+Cache ma koszt - zajmuje pamięć na workerach. Aby usunąć ramkę danych z cache należy użyć funkcji `unpersist`.
+
+```{r, spark_cache_clear_df}
+unpersist(wowah_csv)
+```
+
+```{r, spark_cache_count_3}
+start <- Sys.time()
+count(wowah_csv)
+end <- Sys.time()
+
+loginfo("Computing took %s", end - start)
+```
+
+Jak chcemy wyczyścić cały cache używamy instrucji `clearCache`
+
+```{r, spark_cache_clear_all}
+clearCache()
+```
+
+```{r, spark_cache_count_4}
+start <- Sys.time()
+count(wowah_csv)
+end <- Sys.time()
+
+loginfo("Computing took %s", end - start)
+```
+
+# Partycje
+
+Każdy obiekt w Spark jest dzielony na mniejsze kawałki zwane *partycjami* (ang. *partition*). Partycje są następnie rozrzucane po worker'ach - dzięki temu otrzymujemy dwie wartości dodane: a) fault-tolerant: jak padnie dany worker to partycje z niego są na innym, b) obliczenia są robione na partycjach.
+
+## Wpływ partycji na obliczenia
+
+Jak Spark wykonuje jakieś obliczenie to *partycja* jest **najmniejszą porcją danych** jaka jest użyta do obliczeń. Oznacza to, że Spark zakłada, że może zrównoleglić obliczenia na poziomie partycji. **Ważne** zrozumienie tej zasady pozwala na uniknięcie łatwych do popełnienia błędów przy użyciu Spark.
+
+### Opis przykładu
+
+Mamy dane o graczach w World of Warcraft. Chcemy szybko wyliczać agregaty dla przecięcia `race` (rasa) i `charclass` (klasa postaci). Zbiór ma około 6GB i 108 267 340 wierszy. 
+
+### Przygotowanie danych
+
+Używając skryptu `spark_perfomance_write_partitioned.Rmd` przygotowaliśmy dwa pliki:
+
+* `wow_raw`: surowe dane zapisane w formacie `parquet`
+* `wow_part`: dane spartycjonowane zapisane w formacie `parquet`.
+
+### Wyliczanie agregatów na danych surowych
+
+Wczytajmy danych z formatu `parquet`.
+
+```{r, load_raw}
+wow_raw <- SparkR::loadDF(path = "/data/export/wow_raw",
+                          source = "parquet")
+```
+Następnie policzmy agregat: jaki jest średni zdobyty poziom w podziale na `race` rónego "Tauren" i `charclass` równego "Mage".
+
+
+```{r}
+start <- Sys.time()
+wow_raw_summary <- wow_raw %>%
+  filter(wow_raw$race == "Tauren" & wow_raw$charclass == "Mage") %>%
+  SparkR::summarize(n = n(wow_raw$level),
+                    mean_lvl = mean(wow_raw$level)) %>%
+  SparkR::collect()
+
+loginfo("Raw data time: %s", Sys.time() - start)
+```
+
+Zobaczmy jak wygląda drugie obliczenie
+
+```{r}
+start <- Sys.time()
+wow_raw_summary <- wow_raw %>%
+  filter(wow_raw$race == "Tauren" & wow_raw$charclass == "Mage") %>%
+  SparkR::summarize(n = n(wow_raw$level),
+                    mean_lvl = mean(wow_raw$level)) %>%
+  SparkR::collect()
+
+loginfo("Raw data time: %s", Sys.time() - start)
+```
+
+### Liczenie agregatów na danych spartycjonowanych
+
+Wczytujemy dane
+
+```{r, load_part}
+wow_part <- SparkR::loadDF(path = "/data/export/wow_part",
+                           source = "parquet")
+```
+
+Następnie policzmy agregat: jaki jest średni zdobyty poziom w podziale na `race` rónego "Tauren" i `charclass` równego "Mage".
+
+```{r, calc_part_aggregates}
+start <- Sys.time()
+wow_part_summary <- wow_part %>%
+  filter(wow_part$race == "Tauren" & wow_part$charclass == "Mage") %>%
+  SparkR::summarize(n = n(wow_part$level),
+                    mean_lvl = mean(wow_part$level)) %>%
+  SparkR::collect()
+
+loginfo("part data time: %s", Sys.time() - start)
+```
+
+Zobaczmy jak wygląda drugie obliczenie
+
+```{r}
+start <- Sys.time()
+wow_part_summary <- wow_part %>%
+  filter(wow_part$race == "Tauren" & wow_part$charclass == "Mage") %>%
+  SparkR::summarize(n = n(wow_part$level),
+                    mean_lvl = mean(wow_part$level)) %>%
+  SparkR::collect()
+
+loginfo("part data time: %s", Sys.time() - start)
+```
+
+### Podsumowanie
+
+Mądre użycie partycjonowania może przyśpieszyć obliczenia o parę rzędów wielkości. W naszym przypadku z 11-23s zeszliśmy do około 0,25-0,35s co daje przyśpieszenie rzędu 40+ razy.
+
+
+# Zakończenie połączenia 
+
+```{r, spark-session-stop}
+SparkR::sparkR.session.stop()
+```
