@@ -39,7 +39,8 @@ library(magrittr)
 
 SparkR::sparkR.session(master = "spark://spark-master:7077",
                        sparkConfig = list(spark.driver.memory = "3g",
-                                          spark.executor.memory = "3g"))
+                                          spark.executor.memory = "3g",
+                                          spark.sql.execution.arrow.sparkr.enabled = "true"))
 ```
 
 # Jak działają obliczenia w Spark?
