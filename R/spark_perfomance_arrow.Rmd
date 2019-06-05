@@ -1,0 +1,102 @@
+---
+title: "Użycie technologii arrow"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Przygotowanie środowiska 
+
+## Inicjalizacja R Suite
+
+```{r message=FALSE, warning=FALSE, include=FALSE, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Podłączenie się do Spark
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+library(sparklyr)
+library(magrittr)
+library(dplyr)
+library(microbenchmark)
+library(ggplot2)
+
+conf <- list()
+conf$`sparklyr.cores.local` <- 4
+conf$`sparklyr.shell.driver-memory` <- "6G"
+conf$spark.memory.fraction <- 0.9
+
+sc <- spark_connect(master = "spark://spark-master:7077", 
+                    config = conf)
+```
+
+# Użycie technologii *arrow*
+
+Technologia *arrow* pozwala na szybką wymianę danych oraz wydajne transformacje na tabelach. Jest to bardzo aktywnie rozwijana technologia i powoli staje się standardem. Aktualnie wsparcie dla *arrow* jest w [sparklyr](https://github.com/rstudio/sparklyr).
+
+Poniżej pokazuję jak użycie *arrow* przyśpiesza różne operacje na styku R i Spark. Kody zostały przekopiowane ze strony [Speeding up R and Apache Spark using Apache Arrow](https://arrow.apache.org/blog/2019/01/25/r-spark-improvements/).
+
+## Przygotowanie zbioru danych
+
+```{r}
+data <- data.frame(y = runif(10^7, 0, 1))
+```
+
+## Kopiowane z R do Spark
+
+```{r}
+microbenchmark::microbenchmark(
+  setup = library(arrow),
+  arrow_on = {
+    sparklyr_df <<- copy_to(sc, data, overwrite = T)
+    count(sparklyr_df) %>% collect()
+  },
+  arrow_off = {
+    if ("arrow" %in% .packages()) detach("package:arrow")
+    sparklyr_df <<- copy_to(sc, data, overwrite = T)
+    count(sparklyr_df) %>% collect()
+  },
+  times = 10
+) %T>% print() %>% ggplot2::autoplot()
+```
+
+## Kopiowanie ze Spark do R
+
+```{r}
+microbenchmark::microbenchmark(
+  setup = library(arrow),
+  arrow_on = {
+    collect(sparklyr_df)
+  },
+  arrow_off = {
+    if ("arrow" %in% .packages()) detach("package:arrow")
+    collect(sparklyr_df)
+  },
+  times = 10
+) %T>% print() %>% ggplot2::autoplot()
+```
+
+
+# Zakończenie połączenia 
+
+```{r, spark-session-stop}
+sparklyr::spark_disconnect(sc)
+```
