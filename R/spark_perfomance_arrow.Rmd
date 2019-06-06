@@ -40,9 +40,10 @@ library(microbenchmark)
 library(ggplot2)
 
 conf <- list()
-conf$`sparklyr.cores.local` <- 4
+conf$`sparklyr.cores.local` <- 2
 conf$`sparklyr.shell.driver-memory` <- "6G"
 conf$spark.memory.fraction <- 0.9
+conf$spark.rpc.message.maxSize <- 512
 
 sc <- spark_connect(master = "spark://spark-master:7077", 
                     config = conf)
@@ -63,37 +64,60 @@ data <- data.frame(y = runif(10^7, 0, 1))
 ## Kopiowane z R do Spark
 
 ```{r}
-microbenchmark::microbenchmark(
-  setup = library(arrow),
-  arrow_on = {
-    sparklyr_df <<- copy_to(sc, data, overwrite = T)
-    count(sparklyr_df) %>% collect()
-  },
-  arrow_off = {
-    if ("arrow" %in% .packages()) detach("package:arrow")
-    sparklyr_df <<- copy_to(sc, data, overwrite = T)
-    count(sparklyr_df) %>% collect()
-  },
-  times = 10
-) %T>% print() %>% ggplot2::autoplot()
+library(arrow)
+start <- Sys.time()
+for (i in 1:10) {
+  loginfo("Iteration %d...", i)
+  sparklyr_df <<- copy_to(sc, data, overwrite = T)
+  count(sparklyr_df) %>% collect()
+  loginfo("..done")
+}
+end <- Sys.time()
+
+loginfo("R to Spark with Arrow took %s", end - start)
+```
+
+```{r}
+detach("package:arrow")
+start <- Sys.time()
+for (i in 1:10) {
+  loginfo("Iteration %d...", i)
+  sparklyr_df <<- copy_to(sc, data, overwrite = T)
+  count(sparklyr_df) %>% collect()
+  loginfo("..done")
+}
+end <- Sys.time()
+
+loginfo("R to Spark without Arrow took %s", end - start)
 ```
 
 ## Kopiowanie ze Spark do R
 
 ```{r}
-microbenchmark::microbenchmark(
-  setup = library(arrow),
-  arrow_on = {
-    collect(sparklyr_df)
-  },
-  arrow_off = {
-    if ("arrow" %in% .packages()) detach("package:arrow")
-    collect(sparklyr_df)
-  },
-  times = 10
-) %T>% print() %>% ggplot2::autoplot()
+library(arrow)
+start <- Sys.time()
+for (i in 1:10) {
+  loginfo("Iteration %d...", i)
+  collect(sparklyr_df)
+  loginfo("..done")
+}
+end <- Sys.time()
+
+loginfo("Spark to R with Arrow took %s", end - start)
 ```
 
+```{r}
+detach("package:arrow")
+start <- Sys.time()
+for (i in 1:10) {
+  loginfo("Iteration %d...", i)
+  collect(sparklyr_df)
+  loginfo("..done")
+}
+end <- Sys.time()
+
+loginfo("Spark to R without Arrow took %s", end - start)
+```
 
 # Zakończenie połączenia 
 
