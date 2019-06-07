@@ -39,6 +39,28 @@ library(SparkR)
 SparkR::sparkR.session(master = "spark://spark-master:7077")
 ```
 
+## Pobranie danych
+
+```{r}
+download.file(url = "https://wne-spark-bootcamp.s3.eu-central-1.amazonaws.com/data/wowah_data.zip",
+              destfile = "/data/wowah_data.zip")
+
+unzip("/data/wowah_data.zip")
+file.remove("/data/wowah_data.zip")
+```
+```{r}
+download.file(url = "https://wne-spark-bootcamp.s3.eu-central-1.amazonaws.com/data/log.txt",
+              destfile = "/data/log.txt")
+```
+
+```{r}
+download.file(url = "https://wne-spark-bootcamp.s3.eu-central-1.amazonaws.com/data/wowah_data_big.zip",
+              destfile = "/data/wowah_data_big.zip")
+
+unzip("/data/wowah_data_big.zip")
+file.remove("/data/wowah_data_big.zip")
+```
+
 # Tworzenie ramek danych
 
 Spark operuje na ramkach danych (*SparkDataFrame*). Ramki danych w Spark są bardzo podobne do `data.frame` z R. 
