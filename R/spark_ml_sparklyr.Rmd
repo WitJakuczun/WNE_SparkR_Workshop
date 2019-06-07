@@ -1,0 +1,183 @@
+---
+title: "Machine learning w Spark"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Przygotowanie środowiska 
+
+## Inicjalizacja R Suite
+
+```{r message=FALSE, warning=FALSE, include=FALSE, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Podłączenie się do Spark
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+library(arrow)
+library(SparkR)
+library(sparklyr)
+library(magrittr)
+library(dplyr)
+
+sc <- spark_connect(master = "spark://spark-master:7077", 
+                    config = conf)
+```
+
+
+# Budowanie modelu ML w Spark
+
+## Wczytanie danych
+
+```{r, ml_load_dataset}
+wowah_train <- sparklyr::spark_read_parquet(sc, 
+                                            name = "wowah_train",
+                                            path = file.path("/data/export/wowah_train"),
+                                            memory = TRUE)
+```
+
+## Podział na train/test
+```{r}
+wowah_train_test <- sparklyr::sdf_partition(x = wowah_train,
+                                            train = 0.8,
+                                            test = 0.2)
+```
+## Fitowanie modeli
+
+### Regresja logistyczna
+
+#### Zbudowanie `pipeline`
+```{r}
+wowah_churn_lm_pipeline <- ml_pipeline(sc) %>%
+  ft_feature_hasher(input_cols = "race") %>%
+  ft_r_formula(formula = churned ~ max_level + days_in_game) %>%
+  ml_logistic_regression()
+
+wowah_churn_lm_pipeline
+```
+
+#### Fit
+
+```{r}
+wowah_churn_lm <- ml_fit(wowah_churn_lm_pipeline,
+                         wowah_train_test$train)
+```
+
+### Lasy losowe
+
+#### Pipeline
+
+```{r}
+wowah_churn_rf_pipeline <- ml_pipeline(sc) %>%
+  ft_r_formula(formula = churned ~ max_level + days_in_game) %>%
+  ml_random_forest_classifier()
+```
+
+#### Fit
+
+```{r}
+wowah_churn_rf <- ml_fit(wowah_churn_rf_pipeline,
+                         wowah_train_test$train)
+```
+
+## Ocena modeli
+
+### Predykcja
+
+```{r}
+wowah_pred_lm <- ml_transform(wowah_churn_lm, 
+                              wowah_train_test$test)
+
+head(wowah_pred_lm)
+```
+
+```{r}
+wowah_pred_rf <- ml_transform(
+  wowah_churn_rf,
+  wowah_train_test$test
+)
+
+head(wowah_pred_rf)
+```
+
+### Odczyt wyników
+
+```{r}
+wowah_pred_lm <- wowah_pred_lm %>% 
+  sdf_separate_column("probability", c("p0", "p1")) %>%
+  select(churned, label, p1)
+
+wowah_pred_lm %>%
+  summarise(mchurned = mean(ifelse(churned == label, 1, 0)))
+
+wowah_pred_lm %>%
+  mutate(mchurned = ifelse(churned == label, 1, 0))
+```
+
+```{r}
+wowah_pred_rf <- wowah_pred_rf %>% 
+  sdf_separate_column("probability", c("p0", "p1")) %>%
+  select(churned, label, p1)
+
+wowah_pred_rf %>%
+  mutate(mchurned = ifelse(churned == label, 1, 0))
+```
+## Zapis i odczyt `pipeline`
+
+### Zapis do pliku
+
+```{r}
+ml_save(
+  wowah_churn_lm_pipeline,
+  "/data/export/wowah_churn_lm_pipeline",
+  overwrite = TRUE
+)
+
+ml_save(
+  wowah_churn_lm,
+  "/data/export/wowah_churn_lm",
+  overwrite = TRUE
+)
+```
+
+### Odczyt z pliku
+
+```{r}
+wowah_churn_lm_2 <- ml_load(sc,
+                            "/data/export/wowah_churn_lm")
+```
+
+I test
+```{r}
+wowah_pred_lm <- ml_transform(wowah_churn_lm_2, 
+                              wowah_train_test$test)
+
+wowah_pred_lm <- wowah_pred_lm %>% 
+  sdf_separate_column("probability", c("p0", "p1")) %>%
+  select(churned, label, p1)
+
+wowah_pred_lm %>%
+  summarise(mchurned = mean(ifelse(churned == label, 1, 0)))
+
+wowah_pred_lm %>%
+  mutate(mchurned = ifelse(churned == label, 1, 0))
+```

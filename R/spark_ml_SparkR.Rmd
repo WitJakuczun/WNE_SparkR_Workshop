@@ -1,0 +1,171 @@
+---
+title: "Machine learning w Spark"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Przygotowanie środowiska 
+
+## Inicjalizacja R Suite
+
+```{r message=FALSE, warning=FALSE, include=FALSE, rsuite_init, eval=FALSE}
+# Detect proper script_path (you cannot use args yet as they are build with tools in set_env.r)
+script_path <- (function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  script_path <- dirname(sub("--file=", "", args[grep("--file=", args)]))
+  if (!length(script_path)) {
+    return("R")
+  }
+  if (grepl("darwin", R.version$os)) {
+    base <- gsub("~\\+~", " ", base) # on MacOS ~+~ in path denotes whitespace
+  }
+  return(normalizePath(script_path))
+})()
+
+# Setting .libPaths() to point to libs folder
+source(file.path("..", script_path, "set_env.R"), chdir = T)
+
+config <- load_config()
+args <- args_parser()
+```
+
+## Podłączenie się do Spark
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+library(arrow)
+library(SparkR)
+library(magrittr)
+
+SparkR::sparkR.session(master = "spark://spark-master:7077",
+                       sparkConfig = list(spark.driver.memory = "3g",
+                                          spark.executor.memory = "3g",
+                                          spark.sql.execution.arrow.sparkr.enabled = "true"))
+```
+
+
+# Budowanie modelu ML w Spark
+
+## Wczytanie danych
+
+```{r, ml_load_dataset}
+wowah <- SparkR::loadDF(path = file.path("/data/wowah_data.csv"),
+                        source = "csv",
+                        header = "true",
+                        na.strings = "NA",
+                        schema = structType(
+                          structField("char", "string"),
+                          structField("level", "integer"),
+                          structField("race", "string"),
+                          structField("charclass", "string"),
+                          structField("zone", "string"),
+                          structField("guild", "integer"),
+                          structField("timestamp", "string")
+                        ))
+
+wowah <- withColumn(x = wowah,
+                    colName = "timestamp", 
+                    col = SparkR::to_timestamp(wowah$timestamp,
+                                               format="dd/MM/yy HH:mm:ss"))
+
+cache(wowah)
+```
+
+## Przygotowanie zmiennej objaśnianej
+
+```{r}
+ws <- windowPartitionBy(wowah$char)
+
+wowah <- wowah %>%
+  mutate(activation_date=over(min(wowah$timestamp), ws),
+         last_activitity_date=(over(max(wowah$timestamp), ws)))
+```
+
+```{r}
+wowah$current_date <- "2008-12-31 23:59:59"
+
+wowah <- wowah %>%
+  mutate(current_date = SparkR::to_timestamp(wowah$current_date,
+                                             format = "yyyy-MM-dd HH:mm:ss"))
+
+wowah <- wowah %>%
+  mutate(churned = SparkR::datediff(y = SparkR::to_date(wowah$current_date),
+                                    x = SparkR::to_date(wowah$last_activitity_date)))
+
+wowah <- wowah %>%
+  mutate(churned = wowah$churned > 60)
+
+wowah <- cache(wowah)
+```
+
+## Zbudowanie ramki trenującej
+
+```{r}
+wowah_train <- wowah %>%
+  group_by(wowah$char) %>%
+  summarize(max_level=max(wowah$level),
+            race=SparkR::first(wowah$race),
+            charclass=SparkR::first(wowah$charclass),
+            zone=SparkR::first(wowah$zone),
+            activation_date=SparkR::first(wowah$activation_date),
+            last_activitity_date=SparkR::first(wowah$last_activitity_date),
+            days_in_game = SparkR::datediff(SparkR::to_date(SparkR::first(wowah$last_activitity_date)),
+                                            SparkR::to_date(SparkR::first(wowah$activation_date))),
+            churned=SparkR::first(wowah$churned)) %>%
+  drop(wowah$char) %>%
+  dropna(how = "any")
+
+wowah_train <- SparkR::withColumn(wowah_train,
+                                  colName = "churned",
+                                  col = SparkR::ifelse(wowah_train$churned, 1, 0))
+
+head(wowah_train)
+
+nrow(wowah_train)
+
+wowah_train <- cache(wowah_train)
+```
+### Eksport ramki trenującej do pliku
+
+```{r}
+SparkR::write.parquet(wowah_train,
+                      path = "/data/export/wowah_train")
+```
+
+## Podział na train/test
+```{r}
+wowah_train_test <- SparkR::randomSplit(x = wowah_train,
+                                        weights = c(0.8, 0.2))
+```
+## Fitowanie modeli
+
+### Regresja logistyczna
+```{r}
+wowah_churn_lm <- SparkR::spark.logit(wowah_train_test[[1]],
+                                      churned ~ .,
+                                      handleInvalid = "keep")
+```
+
+### Lasy losowe
+
+```{r}
+wowah_churn_rf <- SparkR::spark.randomForest(wowah_train_test[[1]],
+                                             churned ~ .,
+                                             handleInvalid = "keep")
+```
+
+## Ocena modeli
+
+### Predykcja
+
+```{r}
+wowah_pred_lm <- SparkR::predict(wowah_churn_lm, wowah_train_test[[2]])
+
+head(wowah_pred_lm)
+```
+
+```{r}
+wowah_pred_rf <- SparkR::predict(wowah_churn_lm, wowah_train_test[[2]])
+
+head(wowah_pred_rf)
+```
