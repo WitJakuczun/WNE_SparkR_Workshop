@@ -45,7 +45,7 @@ SparkR::sparkR.session(master = "spark://spark-master:7077")
 download.file(url = "https://wne-spark-bootcamp.s3.eu-central-1.amazonaws.com/data/wowah_data.zip",
               destfile = "/data/wowah_data.zip")
 
-unzip("/data/wowah_data.zip")
+unzip("/data/wowah_data.zip", exdir = "/data/")
 file.remove("/data/wowah_data.zip")
 ```
 ```{r}
@@ -57,7 +57,7 @@ download.file(url = "https://wne-spark-bootcamp.s3.eu-central-1.amazonaws.com/da
 download.file(url = "https://wne-spark-bootcamp.s3.eu-central-1.amazonaws.com/data/wowah_data_big.zip",
               destfile = "/data/wowah_data_big.zip")
 
-unzip("/data/wowah_data_big.zip")
+unzip("/data/wowah_data_big.zip", exdir = "/data/")
 file.remove("/data/wowah_data_big.zip")
 ```
 
